@@ -20,7 +20,11 @@ async fn main() -> Result<()> {
     // 2. Fetch tweet content via FxTwitter API
     println!("🔍 Fetching tweet...");
     let tweet = fetcher::fetch_tweet(&args.url).await?;
-    println!("✅ Fetched: @{} ({} posts in thread)", tweet.author.screen_name, tweet.posts.len());
+    println!(
+        "✅ Fetched: @{} ({} posts in thread)",
+        tweet.author.screen_name,
+        tweet.posts.len()
+    );
 
     // 3. Translate & rewrite via Claude API
     println!("🤖 Translating & rewriting...");
@@ -28,11 +32,7 @@ async fn main() -> Result<()> {
     println!("✅ Article generated: {}", article.title);
 
     // 4. Download and embed images as base64
-    let all_image_urls: Vec<String> = tweet
-        .posts
-        .iter()
-        .flat_map(|p| p.images.clone())
-        .collect();
+    let all_image_urls: Vec<String> = tweet.posts.iter().flat_map(|p| p.images.clone()).collect();
     let embedded_images = if all_image_urls.is_empty() {
         Vec::new()
     } else {

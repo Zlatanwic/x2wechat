@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::cli::Args;
@@ -41,7 +41,11 @@ struct ResponseMessage {
 // Core translation logic
 // ──────────────────────────────────────
 
-pub async fn translate_and_rewrite(config: &Config, tweet: &TweetData, args: &Args) -> Result<Article> {
+pub async fn translate_and_rewrite(
+    config: &Config,
+    tweet: &TweetData,
+    args: &Args,
+) -> Result<Article> {
     let system_prompt = build_system_prompt(&args.style);
     let user_prompt = build_user_prompt(tweet);
 
@@ -63,7 +67,10 @@ pub async fn translate_and_rewrite(config: &Config, tweet: &TweetData, args: &Ar
     let client = reqwest::Client::new();
     let resp = client
         .post("https://api.deepseek.com/chat/completions")
-        .header("Authorization", format!("Bearer {}", config.deepseek_api_key))
+        .header(
+            "Authorization",
+            format!("Bearer {}", config.deepseek_api_key),
+        )
         .header("content-type", "application/json")
         .json(&request)
         .send()

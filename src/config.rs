@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 use std::path::PathBuf;
 
@@ -18,7 +18,9 @@ impl Config {
         // 1. Try environment variable first
         if let Ok(key) = std::env::var("DEEPSEEK_API_KEY") {
             if !key.is_empty() {
-                return Ok(Config { deepseek_api_key: key });
+                return Ok(Config {
+                    deepseek_api_key: key,
+                });
             }
         }
 
@@ -27,12 +29,14 @@ impl Config {
             if path.exists() {
                 let content = std::fs::read_to_string(&path)
                     .with_context(|| format!("Failed to read config: {}", path.display()))?;
-                let file_config: ConfigFile = toml::from_str(&content)
-                    .with_context(|| "Failed to parse config file")?;
+                let file_config: ConfigFile =
+                    toml::from_str(&content).with_context(|| "Failed to parse config file")?;
 
                 if let Some(key) = file_config.deepseek_api_key {
                     if !key.is_empty() {
-                        return Ok(Config { deepseek_api_key: key });
+                        return Ok(Config {
+                            deepseek_api_key: key,
+                        });
                     }
                 }
             }

@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 
 use crate::error::Tweet2WxError;
 use crate::types::*;
@@ -54,7 +54,8 @@ pub async fn fetch_tweet(url: &str) -> Result<TweetData> {
         bail!(Tweet2WxError::FetchFailed(resp.message));
     }
 
-    let tweet = resp.tweet
+    let tweet = resp
+        .tweet
         .ok_or_else(|| Tweet2WxError::FetchFailed("No tweet data in response".into()))?;
 
     Ok(normalize_tweet(&tweet, url))
@@ -125,8 +126,8 @@ fn extract_article_text(article: &FxArticle) -> String {
     let mut prev_was_list = false;
 
     for block in &content.blocks {
-        let is_list = block.block_type == "ordered-list-item"
-            || block.block_type == "unordered-list-item";
+        let is_list =
+            block.block_type == "ordered-list-item" || block.block_type == "unordered-list-item";
 
         match block.block_type.as_str() {
             "unstyled" => {
@@ -189,11 +190,8 @@ fn extract_article_text(article: &FxArticle) -> String {
                         other => other.to_string(),
                     };
                     if let Some(entry) = content.entity_map.iter().find(|e| e.key == key_str) {
-                        if let Some(md) = entry
-                            .value
-                            .data
-                            .as_ref()
-                            .and_then(|d| d.markdown.as_ref())
+                        if let Some(md) =
+                            entry.value.data.as_ref().and_then(|d| d.markdown.as_ref())
                         {
                             parts.push(md.clone());
                         }

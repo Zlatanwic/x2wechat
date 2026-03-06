@@ -156,7 +156,7 @@ pub struct Author {
 #[derive(Debug)]
 pub struct Post {
     pub text: String,
-    pub images: Vec<String>,    // image URLs
+    pub images: Vec<String>, // image URLs
     pub quoted: Option<QuotedPost>,
 }
 
@@ -174,12 +174,12 @@ pub struct QuotedPost {
 #[derive(Debug)]
 pub struct Article {
     pub title: String,
-    pub summary: String,        // one-line summary / subtitle
+    pub summary: String, // one-line summary / subtitle
     pub sections: Vec<Section>,
 }
 
 #[derive(Debug)]
 pub struct Section {
     pub heading: Option<String>,
-    pub body: String,           // may contain multiple paragraphs separated by \n\n
+    pub body: String, // may contain multiple paragraphs separated by \n\n
 }

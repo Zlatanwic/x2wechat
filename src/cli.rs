@@ -1,7 +1,10 @@
 use clap::Parser;
 
 #[derive(Parser, Debug)]
-#[command(name = "tweet2wx", about = "Convert X/Twitter posts to WeChat articles")]
+#[command(
+    name = "tweet2wx",
+    about = "Convert X/Twitter posts to WeChat articles"
+)]
 pub struct Args {
     /// Tweet URL (e.g. https://x.com/user/status/123456789)
     pub url: String,
