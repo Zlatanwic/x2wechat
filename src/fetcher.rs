@@ -1,4 +1,5 @@
 use anyhow::{bail, Context, Result};
+use std::collections::{HashMap, HashSet};
 
 use crate::error::Tweet2WxError;
 use crate::types::*;
@@ -70,18 +71,7 @@ fn normalize_tweet(tweet: &FxTweet, source_url: &str) -> TweetData {
 
     // Check if this is an Article type
     if let Some(ref article) = tweet.article {
-        let text = extract_article_text(article);
-        let mut images = Vec::new();
-
-        // Add cover image if present
-        if let Some(url) = article
-            .cover_media
-            .as_ref()
-            .and_then(|c| c.media_info.as_ref())
-            .and_then(|m| m.original_img_url.clone())
-        {
-            images.push(url);
-        }
+        let (text, images) = extract_article_content(article);
 
         let article_title = article.title.clone();
 
@@ -114,16 +104,45 @@ fn normalize_tweet(tweet: &FxTweet, source_url: &str) -> TweetData {
     }
 }
 
-/// Extract plain text from Article blocks
-fn extract_article_text(article: &FxArticle) -> String {
-    let content = match article.content.as_ref() {
-        Some(c) => c,
-        None => return article.preview_text.clone().unwrap_or_default(),
-    };
-
+/// Extract article body while preserving image positions with placeholders.
+fn extract_article_content(article: &FxArticle) -> (String, Vec<String>) {
     let mut parts: Vec<String> = Vec::new();
+    let mut images = Vec::new();
+    let mut seen = HashSet::new();
     let mut ordered_counter: u32 = 0;
     let mut prev_was_list = false;
+    let media_by_id: HashMap<&str, &str> = article
+        .media_entities
+        .iter()
+        .filter_map(|entity| {
+            entity
+                .media_info
+                .as_ref()
+                .and_then(|info| info.original_img_url.as_deref())
+                .map(|url| (entity.media_id.as_str(), url))
+        })
+        .collect();
+
+    if let Some(url) = article
+        .cover_media
+        .as_ref()
+        .and_then(|c| c.media_info.as_ref())
+        .and_then(|m| m.original_img_url.clone())
+    {
+        push_image_placeholder(&mut parts, &mut images, &mut seen, url);
+    }
+
+    let content = match article.content.as_ref() {
+        Some(c) => c,
+        None => {
+            if let Some(preview) = article.preview_text.as_ref() {
+                if !preview.trim().is_empty() {
+                    parts.push(preview.clone());
+                }
+            }
+            return (parts.join("\n\n"), images);
+        }
+    };
 
     for block in &content.blocks {
         let is_list =
@@ -182,14 +201,26 @@ fn extract_article_text(article: &FxArticle) -> String {
             "atomic" => {
                 ordered_counter = 0;
                 prev_was_list = false;
-                // Look up entity in entityMap
-                if let Some(range) = block.entity_ranges.first() {
+                for range in &block.entity_ranges {
                     let key_str = match &range.key {
                         serde_json::Value::Number(n) => n.to_string(),
                         serde_json::Value::String(s) => s.clone(),
                         other => other.to_string(),
                     };
                     if let Some(entry) = content.entity_map.iter().find(|e| e.key == key_str) {
+                        if let Some(data) = entry.value.data.as_ref() {
+                            for media_item in &data.media_items {
+                                if let Some(url) = media_by_id.get(media_item.media_id.as_str()) {
+                                    push_image_placeholder(
+                                        &mut parts,
+                                        &mut images,
+                                        &mut seen,
+                                        (*url).to_string(),
+                                    );
+                                }
+                            }
+                        }
+
                         if let Some(md) =
                             entry.value.data.as_ref().and_then(|d| d.markdown.as_ref())
                         {
@@ -212,7 +243,19 @@ fn extract_article_text(article: &FxArticle) -> String {
         }
     }
 
-    parts.join("\n\n")
+    (parts.join("\n\n"), images)
+}
+
+fn push_image_placeholder(
+    parts: &mut Vec<String>,
+    images: &mut Vec<String>,
+    seen: &mut HashSet<String>,
+    url: String,
+) {
+    if seen.insert(url.clone()) {
+        images.push(url);
+        parts.push(format!("[[IMAGE:{}]]", images.len()));
+    }
 }
 
 fn normalize_post(tweet: &FxTweet) -> Post {
@@ -238,6 +281,7 @@ fn normalize_post(tweet: &FxTweet) -> Post {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn test_parse_tweet_url() {
@@ -254,5 +298,100 @@ mod tests {
     fn test_invalid_url() {
         assert!(parse_tweet_url("https://google.com").is_err());
         assert!(parse_tweet_url("https://x.com/user").is_err());
+    }
+
+    #[test]
+    fn test_extracts_article_body_images_from_media_entities_in_order() {
+        let tweet: FxTweet = serde_json::from_value(json!({
+            "text": "",
+            "author": {
+                "name": "Alice",
+                "screen_name": "alice"
+            },
+            "article": {
+                "title": "Test Article",
+                "preview_text": "Preview",
+                "cover_media": {
+                    "media_info": {
+                        "original_img_url": "https://pbs.twimg.com/media/cover.jpg"
+                    }
+                },
+                "content": {
+                    "blocks": [
+                        {
+                            "type": "unstyled",
+                            "text": "intro",
+                            "entityRanges": [],
+                            "inlineStyleRanges": []
+                        },
+                        {
+                            "type": "atomic",
+                            "text": " ",
+                            "entityRanges": [{ "key": 0, "offset": 0, "length": 1 }],
+                            "inlineStyleRanges": []
+                        },
+                        {
+                            "type": "atomic",
+                            "text": " ",
+                            "entityRanges": [{ "key": 1, "offset": 0, "length": 1 }],
+                            "inlineStyleRanges": []
+                        }
+                    ],
+                    "entityMap": [
+                        {
+                            "key": "0",
+                            "value": {
+                                "type": "MEDIA",
+                                "data": {
+                                    "mediaItems": [{ "mediaId": "m1" }]
+                                }
+                            }
+                        },
+                        {
+                            "key": "1",
+                            "value": {
+                                "type": "MEDIA",
+                                "data": {
+                                    "mediaItems": [{ "mediaId": "m2" }]
+                                }
+                            }
+                        }
+                    ]
+                },
+                "media_entities": [
+                    {
+                        "media_id": "m1",
+                        "media_info": {
+                            "original_img_url": "https://pbs.twimg.com/media/body-1.jpg"
+                        }
+                    },
+                    {
+                        "media_id": "m2",
+                        "media_info": {
+                            "original_img_url": "https://pbs.twimg.com/media/body-2.png"
+                        }
+                    }
+                ]
+            }
+        }))
+        .unwrap();
+
+        let normalized = normalize_tweet(&tweet, "https://x.com/alice/status/1");
+        let body = &normalized.posts[0].text;
+
+        assert!(body.contains("[[IMAGE:1]]"));
+        assert!(body.contains("[[IMAGE:2]]"));
+        assert!(body.contains("[[IMAGE:3]]"));
+        assert!(body.find("[[IMAGE:1]]").unwrap() < body.find("intro").unwrap());
+        assert!(body.find("[[IMAGE:2]]").unwrap() > body.find("intro").unwrap());
+        assert!(body.find("[[IMAGE:3]]").unwrap() > body.find("[[IMAGE:2]]").unwrap());
+        assert_eq!(
+            normalized.posts[0].images,
+            vec![
+                "https://pbs.twimg.com/media/cover.jpg".to_string(),
+                "https://pbs.twimg.com/media/body-1.jpg".to_string(),
+                "https://pbs.twimg.com/media/body-2.png".to_string(),
+            ]
+        );
     }
 }

@@ -20,6 +20,10 @@ pub struct Args {
     /// Override LLM model name
     #[arg(long, default_value = "deepseek-chat")]
     pub model: String,
+
+    /// Maximum output tokens requested from the LLM
+    #[arg(long, default_value_t = 8192)]
+    pub max_tokens: u32,
 }
 
 impl Args {

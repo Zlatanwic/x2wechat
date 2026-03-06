@@ -30,6 +30,7 @@ struct ApiResponse {
 #[derive(Deserialize)]
 struct Choice {
     message: ResponseMessage,
+    finish_reason: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -46,12 +47,13 @@ pub async fn translate_and_rewrite(
     tweet: &TweetData,
     args: &Args,
 ) -> Result<Article> {
+    let max_tokens = validate_max_tokens(args.max_tokens)?;
     let system_prompt = build_system_prompt(&args.style);
     let user_prompt = build_user_prompt(tweet);
 
     let request = ApiRequest {
         model: args.model.clone(),
-        max_tokens: 4096,
+        max_tokens,
         messages: vec![
             Message {
                 role: "system".into(),
@@ -88,13 +90,37 @@ pub async fn translate_and_rewrite(
         .await
         .with_context(|| "Failed to parse DeepSeek API response")?;
 
-    let text = api_resp
+    let choice = api_resp
         .choices
         .first()
-        .map(|c| c.message.content.clone())
-        .unwrap_or_default();
+        .ok_or_else(|| anyhow::anyhow!("DeepSeek API returned no choices"))?;
+
+    validate_finish_reason(choice.finish_reason.as_deref(), max_tokens)?;
+
+    let text = choice.message.content.clone();
 
     parse_article_response(&text)
+}
+
+fn validate_max_tokens(max_tokens: u32) -> Result<u32> {
+    if !(1..=8192).contains(&max_tokens) {
+        bail!(
+            "Invalid --max-tokens value {max_tokens}. DeepSeek only accepts values in [1, 8192]."
+        );
+    }
+
+    Ok(max_tokens)
+}
+
+fn validate_finish_reason(finish_reason: Option<&str>, max_tokens: u32) -> Result<()> {
+    if matches!(finish_reason, Some("length")) {
+        bail!(
+            "LLM output was truncated because it hit max_tokens={max_tokens}. \
+Try rerunning with a higher --max-tokens value."
+        );
+    }
+
+    Ok(())
 }
 
 fn build_system_prompt(style: &str) -> String {
@@ -131,6 +157,7 @@ fn build_system_prompt(style: &str) -> String {
 ## 注意事项
 - 忠实翻译原文内容，不要增删改写，保持原文的段落结构和顺序
 - 原文中的代码块（```...```）和行内代码（`...`）必须原样保留，不要翻译代码内容
+- 原文中如果出现 `[[IMAGE:n]]` 这样的图片占位符，必须原样保留在对应位置，不要删除、移动、改写
 - 保留专业术语的英文原文（如 LLM, RLHF, transformer 等）
 - 如有引用推文（quote），保持引用结构
 - 标题翻译原文标题即可，不要另起标题"#
@@ -151,6 +178,10 @@ fn build_user_prompt(tweet: &TweetData) -> String {
         "以下是 @{} ({}) 的推文内容，请改写为公众号文章：\n\n",
         tweet.author.screen_name, tweet.author.name
     ));
+
+    content.push_str(
+        "注意：如果正文里出现 `[[IMAGE:n]]`，那是图片位置标记，必须在输出中原样保留在同一位置。\n\n",
+    );
 
     for (i, post) in tweet.posts.iter().enumerate() {
         if tweet.posts.len() > 1 {
@@ -242,5 +273,29 @@ mod tests {
         assert_eq!(article.summary, "这是摘要");
         assert_eq!(article.sections.len(), 2);
         assert_eq!(article.sections[0].heading.as_deref(), Some("第一节"));
+    }
+
+    #[test]
+    fn test_validate_finish_reason_rejects_truncated_output() {
+        let err = validate_finish_reason(Some("length"), 4096).unwrap_err();
+        assert!(err.to_string().contains("max_tokens=4096"));
+    }
+
+    #[test]
+    fn test_validate_finish_reason_accepts_complete_output() {
+        validate_finish_reason(Some("stop"), 4096).unwrap();
+        validate_finish_reason(None, 4096).unwrap();
+    }
+
+    #[test]
+    fn test_validate_max_tokens_rejects_out_of_range_values() {
+        assert!(validate_max_tokens(0).is_err());
+        assert!(validate_max_tokens(8193).is_err());
+    }
+
+    #[test]
+    fn test_validate_max_tokens_accepts_deepseek_limit() {
+        assert_eq!(validate_max_tokens(1).unwrap(), 1);
+        assert_eq!(validate_max_tokens(8192).unwrap(), 8192);
     }
 }

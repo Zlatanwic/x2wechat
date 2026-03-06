@@ -1,9 +1,9 @@
 use html_escape::{encode_double_quoted_attribute, encode_text};
+use std::collections::HashSet;
 
 use crate::image::EmbeddedImage;
 use crate::types::*;
 
-// ── Style Constants ─────────────────────────────
 const FONT_FAMILY: &str = "-apple-system, BlinkMacSystemFont, 'Helvetica Neue', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif";
 const MONO_FONT: &str = "'Menlo', 'Monaco', 'Courier New', monospace";
 const COLOR_TEXT: &str = "#2b2b2b";
@@ -20,11 +20,15 @@ const COLOR_QUOTE_BG: &str = "#f7f8fa";
 const COLOR_DIVIDER: &str = "#e8e8e8";
 const COLOR_BG: &str = "#ffffff";
 
-/// Render an article to WeChat-compatible inline-styled HTML
 pub fn render_article(article: &Article, tweet: &TweetData, embedded: &[EmbeddedImage]) -> String {
     let mut html = String::new();
+    let all_images: Vec<&str> = tweet
+        .posts
+        .iter()
+        .flat_map(|p| p.images.iter().map(|s| s.as_str()))
+        .collect();
+    let mut used_images = HashSet::new();
 
-    // HTML wrapper (for local preview only)
     html.push_str(&format!(
         r#"<!DOCTYPE html>
 <html lang="zh-CN">
@@ -39,7 +43,6 @@ pub fn render_article(article: &Article, tweet: &TweetData, embedded: &[Embedded
         title = encode_text(&article.title)
     ));
 
-    // Title
     html.push_str(&format!(
         r#"<h1 style="font-size: 24px; font-weight: 700; color: {COLOR_HEADING}; text-align: center; margin: 0 0 8px 0; line-height: 1.4;">{}</h1>
 <p style="text-align: center; margin: 0 0 4px 0;"><span style="display: inline-block; width: 40px; height: 3px; background: {COLOR_ACCENT}; border-radius: 2px;"></span></p>
@@ -47,7 +50,6 @@ pub fn render_article(article: &Article, tweet: &TweetData, embedded: &[Embedded
         encode_text(&article.title)
     ));
 
-    // Summary
     if !article.summary.is_empty() {
         html.push_str(&format!(
             r#"<p style="text-align: center; color: {COLOR_MUTED}; font-size: 13px; margin: 0 0 28px 0; line-height: 1.6;">{}</p>
@@ -56,10 +58,8 @@ pub fn render_article(article: &Article, tweet: &TweetData, embedded: &[Embedded
         ));
     }
 
-    // Divider (three dots)
     html.push_str(&render_divider());
 
-    // Sections
     for section in &article.sections {
         if let Some(ref heading) = section.heading {
             html.push_str(&format!(
@@ -69,38 +69,32 @@ pub fn render_article(article: &Article, tweet: &TweetData, embedded: &[Embedded
             ));
         }
 
-        html.push_str(&render_body(&section.body));
+        html.push_str(&render_body(
+            &section.body,
+            &all_images,
+            embedded,
+            &mut used_images,
+        ));
     }
 
-    // Images
-    let all_images: Vec<&str> = tweet
-        .posts
+    let unused_images: Vec<usize> = all_images
         .iter()
-        .flat_map(|p| p.images.iter().map(|s| s.as_str()))
+        .enumerate()
+        .filter_map(|(idx, _)| (!used_images.contains(&idx)).then_some(idx))
         .collect();
 
-    if !all_images.is_empty() {
+    if !unused_images.is_empty() {
         html.push_str(&render_divider());
-        for img_url in &all_images {
-            if let Some(ei) = embedded.iter().find(|e| e.original_url == *img_url) {
-                html.push_str(&format!(
-                    r#"<section style="text-align: center; margin: 24px 0;"><img src="data:{};base64,{}" style="max-width: 100%; border-radius: 8px; box-shadow: 0 2px 12px rgba(0,0,0,0.08);" /></section>
-"#,
-                    ei.mime_type, ei.base64_data
-                ));
-            } else {
-                html.push_str(&format!(
-                    r#"<!-- ⚠️ 图片下载失败，请手动上传此图片: {} -->
-<section style="text-align: center; margin: 24px 0;"><img src="{}" style="max-width: 100%; border-radius: 8px; box-shadow: 0 2px 12px rgba(0,0,0,0.08);" /></section>
-"#,
-                    encode_text(img_url),
-                    encode_text(img_url)
-                ));
-            }
+        for idx in unused_images {
+            html.push_str(&render_image_by_index(
+                idx + 1,
+                &all_images,
+                embedded,
+                &mut used_images,
+            ));
         }
     }
 
-    // Footer
     html.push_str(&format!(
         r#"<section style="margin: 36px 0 0 0; padding: 20px; background: {COLOR_QUOTE_BG}; border-radius: 8px;">
 <p style="font-size: 12px; color: #999; margin: 0 0 4px 0; text-align: center;">原文作者：{author} (@{screen_name})</p>
@@ -114,7 +108,6 @@ pub fn render_article(article: &Article, tweet: &TweetData, embedded: &[Embedded
         url_text = encode_text(&tweet.source_url),
     ));
 
-    // Close
     html.push_str(
         r#"</section>
 </body>
@@ -135,8 +128,6 @@ fn render_divider() -> String {
     )
 }
 
-// ── Block-level rendering ───────────────────────
-
 #[derive(PartialEq)]
 enum BlockMode {
     Plain,
@@ -146,8 +137,12 @@ enum BlockMode {
     OrderedList,
 }
 
-/// Render section body with support for code blocks, lists, blockquotes, and inline formatting.
-fn render_body(body: &str) -> String {
+fn render_body(
+    body: &str,
+    all_images: &[&str],
+    embedded: &[EmbeddedImage],
+    used_images: &mut HashSet<usize>,
+) -> String {
     let mut result = String::new();
     let mut mode = BlockMode::Plain;
     let mut buf: Vec<String> = Vec::new();
@@ -155,11 +150,9 @@ fn render_body(body: &str) -> String {
     for line in body.lines() {
         let trimmed = line.trim_start();
 
-        // Code fence toggle
         if trimmed.starts_with("```") {
             match mode {
                 BlockMode::Code { .. } => {
-                    // End code block
                     let lang = if let BlockMode::Code { ref lang } = mode {
                         lang.clone()
                     } else {
@@ -171,8 +164,14 @@ fn render_body(body: &str) -> String {
                     continue;
                 }
                 _ => {
-                    // Flush current, start code block
-                    flush_block(&mut result, &mode, &mut buf);
+                    flush_block(
+                        &mut result,
+                        &mode,
+                        &mut buf,
+                        all_images,
+                        embedded,
+                        used_images,
+                    );
                     let lang_str = trimmed[3..].trim();
                     let lang = if lang_str.is_empty() {
                         None
@@ -190,11 +189,36 @@ fn render_body(body: &str) -> String {
             continue;
         }
 
-        // Detect line type
+        if let Some(image_idx) = parse_image_placeholder(trimmed) {
+            flush_block(
+                &mut result,
+                &mode,
+                &mut buf,
+                all_images,
+                embedded,
+                used_images,
+            );
+            mode = BlockMode::Plain;
+            result.push_str(&render_image_by_index(
+                image_idx,
+                all_images,
+                embedded,
+                used_images,
+            ));
+            continue;
+        }
+
         let line_mode = detect_line_type(trimmed);
 
         if line_mode != mode {
-            flush_block(&mut result, &mode, &mut buf);
+            flush_block(
+                &mut result,
+                &mode,
+                &mut buf,
+                all_images,
+                embedded,
+                used_images,
+            );
             mode = line_mode;
         }
 
@@ -216,20 +240,31 @@ fn render_body(body: &str) -> String {
                     buf.push(trimmed.to_string());
                 }
             }
-            BlockMode::Plain => {
-                buf.push(line.to_string());
-            }
+            BlockMode::Plain => buf.push(line.to_string()),
             BlockMode::Code { .. } => unreachable!(),
         }
     }
 
-    // If code block was never closed, dump as plain text
     if let BlockMode::Code { .. } = mode {
         let mut plain_buf: Vec<String> = vec!["```".to_string()];
         plain_buf.append(&mut buf);
-        flush_block(&mut result, &BlockMode::Plain, &mut plain_buf);
+        flush_block(
+            &mut result,
+            &BlockMode::Plain,
+            &mut plain_buf,
+            all_images,
+            embedded,
+            used_images,
+        );
     } else {
-        flush_block(&mut result, &mode, &mut buf);
+        flush_block(
+            &mut result,
+            &mode,
+            &mut buf,
+            all_images,
+            embedded,
+            used_images,
+        );
     }
 
     result
@@ -256,14 +291,22 @@ fn is_ordered_list_line(s: &str) -> bool {
     i > 0 && i + 1 < bytes.len() && bytes[i] == b'.' && bytes[i + 1] == b' '
 }
 
-fn flush_block(result: &mut String, mode: &BlockMode, buf: &mut Vec<String>) {
+fn flush_block(
+    result: &mut String,
+    mode: &BlockMode,
+    buf: &mut Vec<String>,
+    all_images: &[&str],
+    embedded: &[EmbeddedImage],
+    used_images: &mut HashSet<usize>,
+) {
     if buf.is_empty() {
         return;
     }
+
     match mode {
         BlockMode::Plain => {
             let text = buf.join("\n");
-            result.push_str(&render_paragraphs(&text));
+            result.push_str(&render_paragraphs(&text, all_images, embedded, used_images));
         }
         BlockMode::Quote => {
             let text = buf.join("\n");
@@ -277,21 +320,36 @@ fn flush_block(result: &mut String, mode: &BlockMode, buf: &mut Vec<String>) {
             let items: Vec<&str> = buf.iter().map(|s| s.as_str()).collect();
             result.push_str(&render_list_items(&items, true));
         }
-        BlockMode::Code { .. } => {} // handled separately
+        BlockMode::Code { .. } => {}
     }
+
     buf.clear();
 }
 
-// ── Element renderers ───────────────────────────
-
-fn render_paragraphs(text: &str) -> String {
+fn render_paragraphs(
+    text: &str,
+    all_images: &[&str],
+    embedded: &[EmbeddedImage],
+    used_images: &mut HashSet<usize>,
+) -> String {
     let mut result = String::new();
+
     for para in text.split("\n\n") {
         let trimmed = para.trim();
         if trimmed.is_empty() {
             continue;
         }
-        // Check for markdown heading
+
+        if let Some(image_idx) = parse_image_placeholder(trimmed) {
+            result.push_str(&render_image_by_index(
+                image_idx,
+                all_images,
+                embedded,
+                used_images,
+            ));
+            continue;
+        }
+
         if trimmed.starts_with("## ") {
             result.push_str(&format!(
                 r#"<h2 style="font-size: 18px; font-weight: 700; color: {COLOR_HEADING}; margin: 32px 0 16px 0; padding-left: 12px; border-left: 4px solid {COLOR_ACCENT}; line-height: 1.4;">{}</h2>
@@ -309,7 +367,48 @@ fn render_paragraphs(text: &str) -> String {
             result.push('\n');
         }
     }
+
     result
+}
+
+fn parse_image_placeholder(text: &str) -> Option<usize> {
+    let inner = text
+        .trim()
+        .strip_prefix("[[IMAGE:")?
+        .strip_suffix("]]")?;
+    inner.parse::<usize>().ok().filter(|idx| *idx > 0)
+}
+
+fn render_image_by_index(
+    index: usize,
+    all_images: &[&str],
+    embedded: &[EmbeddedImage],
+    used_images: &mut HashSet<usize>,
+) -> String {
+    let Some(zero_based) = index.checked_sub(1) else {
+        return String::new();
+    };
+    let Some(img_url) = all_images.get(zero_based).copied() else {
+        return String::new();
+    };
+
+    used_images.insert(zero_based);
+
+    if let Some(ei) = embedded.iter().find(|e| e.original_url == img_url) {
+        format!(
+            r#"<section style="text-align: center; margin: 24px 0;"><img src="data:{};base64,{}" style="max-width: 100%; border-radius: 8px; box-shadow: 0 2px 12px rgba(0,0,0,0.08);" /></section>
+"#,
+            ei.mime_type, ei.base64_data
+        )
+    } else {
+        format!(
+            r#"<!-- 图片下载失败，请手动上传此图片: {} -->
+<section style="text-align: center; margin: 24px 0;"><img src="{}" style="max-width: 100%; border-radius: 8px; box-shadow: 0 2px 12px rgba(0,0,0,0.08);" /></section>
+"#,
+            encode_text(img_url),
+            encode_text(img_url)
+        )
+    }
 }
 
 fn render_code_block(lang: Option<&str>, code: &str) -> String {
@@ -317,7 +416,6 @@ fn render_code_block(lang: Option<&str>, code: &str) -> String {
         r#"<section style="margin: 20px 0; background: {COLOR_CODE_BG}; border-radius: 8px; overflow: hidden;">"#
     );
 
-    // Language bar
     if let Some(lang) = lang {
         if !lang.is_empty() {
             html.push_str(&format!(
@@ -360,9 +458,7 @@ fn render_list_items(items: &[&str], ordered: bool) -> String {
                 i + 1
             )
         } else {
-            format!(
-                r#"<span style="color: {COLOR_ACCENT}; font-weight: bold; margin-right: 8px;">•</span>"#
-            )
+            format!(r#"<span style="color: {COLOR_ACCENT}; font-weight: bold; margin-right: 8px;">•</span>"#)
         };
         let content = render_inline(item);
         html.push_str(&format!(
@@ -382,7 +478,6 @@ fn render_paragraph(text: &str) -> String {
     )
 }
 
-/// Process inline formatting: `code`, **bold**
 fn render_inline(text: &str) -> String {
     let mut result = String::new();
     let mut i: usize = 0;
@@ -456,6 +551,11 @@ fn render_inline(text: &str) -> String {
 mod tests {
     use super::*;
 
+    fn render_body_for_test(body: &str) -> String {
+        let mut used_images = HashSet::new();
+        render_body(body, &[], &[], &mut used_images)
+    }
+
     #[test]
     fn test_render_code_block() {
         let result = render_code_block(None, "let x = 1;");
@@ -463,7 +563,6 @@ mod tests {
         assert!(result.contains("<pre"));
         assert!(result.contains("<section"));
         assert!(result.contains("let x = 1;"));
-        // No language bar when lang is None
         assert!(!result.contains("#2d2d2d"));
     }
 
@@ -471,7 +570,7 @@ mod tests {
     fn test_render_code_block_with_lang() {
         let result = render_code_block(Some("rust"), "fn main() {}");
         assert!(result.contains("rust"));
-        assert!(result.contains("#2d2d2d")); // language bar background
+        assert!(result.contains("#2d2d2d"));
         assert!(result.contains("fn main() {}"));
     }
 
@@ -488,11 +587,11 @@ mod tests {
     #[test]
     fn test_render_body_mixed() {
         let body = "这是普通段落。\n\n```rust\nfn main() {}\n```\n\n这是 `行内代码` 示例。";
-        let result = render_body(body);
+        let result = render_body_for_test(body);
         assert!(result.contains("<p"));
         assert!(result.contains("<pre"));
         assert!(result.contains("<code"));
-        assert!(result.contains("rust")); // language label
+        assert!(result.contains("rust"));
     }
 
     #[test]
@@ -524,18 +623,18 @@ mod tests {
     #[test]
     fn test_render_blockquote() {
         let body = "> 这是一段引用\n> 第二行引用";
-        let result = render_body(body);
+        let result = render_body_for_test(body);
         assert!(result.contains("<blockquote"));
         assert!(result.contains("这是一段引用"));
         assert!(result.contains("第二行引用"));
-        assert!(result.contains(COLOR_ACCENT)); // blue left border
+        assert!(result.contains(COLOR_ACCENT));
     }
 
     #[test]
     fn test_render_unordered_list() {
         let body = "- 第一项\n- 第二项\n- 第三项";
-        let result = render_body(body);
-        assert!(result.contains("•")); // bullet
+        let result = render_body_for_test(body);
+        assert!(result.contains("•"));
         assert!(result.contains("第一项"));
         assert!(result.contains("第三项"));
     }
@@ -543,7 +642,7 @@ mod tests {
     #[test]
     fn test_render_ordered_list() {
         let body = "1. 第一步\n2. 第二步\n3. 第三步";
-        let result = render_body(body);
+        let result = render_body_for_test(body);
         assert!(result.contains("1."));
         assert!(result.contains("2."));
         assert!(result.contains("第一步"));
@@ -565,5 +664,20 @@ mod tests {
         assert!(result.contains(COLOR_ACCENT));
         assert!(result.contains("border-radius: 50%"));
         assert!(result.contains("opacity: 0.5"));
+    }
+
+    #[test]
+    fn test_render_image_placeholder_inline() {
+        let mut used_images = HashSet::new();
+        let result = render_body(
+            "第一段\n\n[[IMAGE:1]]\n\n第二段",
+            &["https://example.com/a.png"],
+            &[],
+            &mut used_images,
+        );
+        assert!(result.contains("https://example.com/a.png"));
+        assert!(result.contains("第一段"));
+        assert!(result.contains("第二段"));
+        assert!(used_images.contains(&0));
     }
 }

@@ -67,6 +67,8 @@ pub struct FxArticle {
     pub preview_text: Option<String>,
     pub cover_media: Option<FxCoverMedia>,
     pub content: Option<FxArticleContent>,
+    #[serde(default)]
+    pub media_entities: Vec<FxArticleMediaEntity>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -132,6 +134,22 @@ pub struct FxEntityValue {
 #[derive(Debug, Deserialize)]
 pub struct FxEntityData {
     pub markdown: Option<String>,
+    #[serde(rename = "mediaItems", default)]
+    pub media_items: Vec<FxEntityMediaItem>,
+    #[allow(dead_code)]
+    pub caption: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct FxEntityMediaItem {
+    #[serde(rename = "mediaId")]
+    pub media_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct FxArticleMediaEntity {
+    pub media_id: String,
+    pub media_info: Option<FxCoverMediaInfo>,
 }
 
 // ──────────────────────────────────────
